@@ -2,11 +2,12 @@
 Günlük LightGBM Tahmin Pipeline Script'i.
 
 PostgreSQL veritabanındaki TRAINING_DATA_START (2023-01-01) sonrası geçmiş veriyi yükler,
-Robust Feature Set ile 3 başlı LightGBM quantile modelini (P10/P50/P90) eğitir,
+Robust Feature Set ile çok-pencereli LightGBM ensemble'ını (90g/150g/tüm geçmiş) eğitir,
 önümüzdeki 24 saat için PTF tahminlerini üretir ve
 `gold.ptf_predictions_daily` tablosuna kaydeder.
 
-Not: log-transform quantile objective ile KULLANILMAZ (bkz. LightGBMForecaster).
+P10/P90 artık quantile head'lerinden değil, son 60 günün hatalarından kurulan
+yuvarlanan konformal banddan gelir (bkz. src/models/ensemble.py).
 """
 
 import sys
@@ -23,7 +24,7 @@ sys.path.insert(0, str(project_root))
 from db.connection import get_db_engine
 from sqlalchemy import text
 from src.features.feature_engineering import build_robust_features, get_feature_columns
-from src.models.lightgbm_model import LightGBMForecaster
+from src.models import ensemble as ens_mod
 
 logger = logging.getLogger("DailyPredictionPipeline")
 
@@ -63,12 +64,20 @@ def create_gold_schema_if_not_exists(run_backfill_if_empty: bool = True):
         conn.execute(text("ALTER TABLE gold.ptf_predictions_daily ADD COLUMN IF NOT EXISTS predicted_mcp_try_p90 NUMERIC(10, 4);"))
         conn.commit()
         
-        # Tablo verisini kontrol et
-        count = conn.execute(text("SELECT COUNT(*) FROM gold.ptf_predictions_daily;")).scalar()
+        # Tablo verisini kontrol et — AKTİF MODEL bazında.
+        # Toplam satır sayısına bakmak tuzaktı: eski model (LightGBM_v1) 17.000+ satırla
+        # dururken yeni model sıfır satıra sahip olabilir. O durumda backfill tetiklenmez,
+        # konformal band kalibrasyon geçmişi bulamaz ve 20 gün boyunca sessizce sabit
+        # ±$25 fallback'ine düşerdi — dashboard'da hatalı geniş güven aralığı olarak.
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM gold.ptf_predictions_daily WHERE model_name = :m;"),
+            {"m": ens_mod.MODEL_NAME}).scalar()
 
     # Connection kapandıktan sonra backfill gerekiyorsa çalıştır
     if run_backfill_if_empty and count < 1000:
-        logger.info("⚡ First-time deployment detected or empty gold table! Automatically running 2-year (730-day) backfill for dashboard history...")
+        logger.info("⚡ '%s' için geçmiş yok (%d satır) — 730 günlük backfill tetikleniyor. "
+                    "Bu hem dashboard geçmişini hem konformal band kalibrasyonunu kurar.",
+                    ens_mod.MODEL_NAME, count)
         from scripts.backfill_pre_forecasts import run_pre_forecasts_backfill
         from scripts.backfill_gold_predictions import backfill_historical_predictions
         try:
@@ -193,37 +202,13 @@ def run_daily_prediction(force: bool = False):
     from fetch_epias_data import resolve_usd_try_rate
     latest_usd_try = resolve_usd_try_rate(df=df_raw, engine=engine)
 
-    # 4. LightGBM Eğitimi (Tüm Geçmiş Veri İle - 3 Başlı Quantile Regression)
-    X_train = df_model[feature_cols]
-    y_train = df_model[target_col].values
-
-    # P50 (Medyan - Klasik Nokta Tahmini)
-    forecaster = LightGBMForecaster(params={
-        'objective': 'quantile', 'alpha': 0.50,
-        'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 8, 'num_leaves': 63,
-        'min_child_samples': 10,
-        'verbose': -1, 'random_state': 42
-    })
-    forecaster.fit(X_train, y_train)
-
-    # P10 (Alt Sınır - %10 Güven)
-    forecaster_p10 = LightGBMForecaster(params={
-        'objective': 'quantile', 'alpha': 0.10,
-        'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 8, 'num_leaves': 63,
-        'min_child_samples': 10,
-        'verbose': -1, 'random_state': 42
-    })
-    forecaster_p10.fit(X_train, y_train)
-
-    # P90 (Üst Sınır - %90 Güven)
-    forecaster_p90 = LightGBMForecaster(params={
-        'objective': 'quantile', 'alpha': 0.90,
-        'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 8, 'num_leaves': 63,
-        'min_child_samples': 10,
-        'verbose': -1, 'random_state': 42
-    })
-    forecaster_p90.fit(X_train, y_train)
-    logger.info("🌲 3-Head LightGBM Quantile Models (P10, P50, P90) trained successfully.")
+    # 4. Çok-pencereli ensemble eğitimi (3 x P50: 90g / 150g / tüm geçmiş)
+    # Eski 3-head quantile (P10/P50/P90) yaklaşımının yerini aldı: quantile head'lerinin
+    # kapsaması çöküş rejiminde %59.7'ye düşüyordu. Band artık konformal (ADIM 5e).
+    # Mantık src/models/ensemble.py'de — backfill de AYNI modülü çağırır; ayrışırlarsa
+    # backfill'in ürettiği kalibrasyon geçmişi canlının bandını sessizce bozar.
+    ens_models = ens_mod.fit_members(df_model, feature_cols, target_col=target_col)
+    logger.info("🌲 Ensemble üyeleri eğitildi: %s", ", ".join(sorted(ens_models)))
 
     # 5. Gelecek 24 Saat İçin Inference Verisi Hazırlama (GÖP Piyasasında Tahmin Hedefi HER ZAMAN Yarındır - T+1)
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -382,21 +367,40 @@ def run_daily_prediction(force: bool = False):
             future_df[col] = 0.0
             logger.warning(f"⚠️ Feature '{col}' not found in future_df, filled with 0.0")
 
-    # Tahmin Üret (3 Model)
-    preds_usd = forecaster.predict(future_df[feature_cols])
-    preds_usd_p10 = forecaster_p10.predict(future_df[feature_cols])
-    preds_usd_p90 = forecaster_p90.predict(future_df[feature_cols])
+    # --- ADIM 5d: Üyelerden P50 ve anlaşmazlık ---
+    member_preds = ens_mod.predict_members(ens_models, future_df, feature_cols)
+    preds_usd, disagreement = ens_mod.combine(member_preds)
 
-    # Quantile Crossover Koruması (Monotonic Guarantee: P10 <= P50 <= P90)
-    preds_usd_p10 = np.minimum(preds_usd_p10, preds_usd)
-    preds_usd_p90 = np.maximum(preds_usd_p90, preds_usd)
+    # --- ADIM 5e: Konformal band ---
+    # Kalibrasyon = son 60 günün (ensemble P50 - gerçekleşen) hataları, saat bazlı.
+    # Hedef gün pencerenin DIŞINDA (build_error_history `before` parametresi).
+    with engine.connect() as conn:
+        hist = pd.read_sql(text("""
+            SELECT g.target_ts, g.predicted_mcp_usd, m.price_usd
+            FROM gold.ptf_predictions_daily g
+            JOIN raw_mcp_hourly m ON m.ts = g.target_ts
+            WHERE g.model_name = :model AND g.target_ts >= :since
+            ORDER BY g.target_ts
+        """), conn, params={"model": ens_mod.MODEL_NAME,
+                            "since": (next_24h_index[0] - pd.Timedelta(days=ens_mod.CALIBRATION_DAYS)).isoformat()})
+    if len(hist):
+        hist["target_ts"] = pd.to_datetime(hist["target_ts"], utc=True).dt.tz_convert("Europe/Istanbul")
+        hist = hist.set_index("target_ts")
+        error_history = ens_mod.build_error_history(
+            hist["predicted_mcp_usd"].astype(float), hist["price_usd"].astype(float),
+            before=next_24h_index[0])
+    else:
+        error_history = None
+
+    preds_usd_p10, preds_usd_p90, band_source, cal_days = ens_mod.conformal_band(
+        preds_usd, list(next_24h_index.hour), disagreement, error_history)
+    logger.info("📐 Band: %s (%d gün kalibrasyon, ortalama genişlik $%.1f, anlaşmazlık $%.2f)",
+                band_source, cal_days, float(np.mean(preds_usd_p90 - preds_usd_p10)),
+                float(np.mean(disagreement)))
 
     preds_try = preds_usd * latest_usd_try
     preds_try_p10 = preds_usd_p10 * latest_usd_try
     preds_try_p90 = preds_usd_p90 * latest_usd_try
-
-    preds_try_p10 = np.minimum(preds_try_p10, preds_try)
-    preds_try_p90 = np.maximum(preds_try_p90, preds_try)
 
     results_df = pd.DataFrame({
         'target_ts': next_24h_index,
@@ -406,7 +410,7 @@ def run_daily_prediction(force: bool = False):
         'predicted_mcp_try_p10': np.round(preds_try_p10, 4),
         'predicted_mcp_usd_p90': np.round(preds_usd_p90, 4),
         'predicted_mcp_try_p90': np.round(preds_try_p90, 4),
-        'model_name': 'LightGBM_v1'
+        'model_name': ens_mod.MODEL_NAME
     })
 
     # 6. Veritabanı gold.ptf_predictions_daily Tablosuna Kaydet (Upsert / Insert)

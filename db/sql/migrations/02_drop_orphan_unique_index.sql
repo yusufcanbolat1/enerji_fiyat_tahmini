@@ -1,0 +1,32 @@
+-- ═══════════════════════════════════════════════════════════════════════════
+-- 02 — gold.ptf_predictions_daily: öksüz UNIQUE index'i düşür
+--
+-- SORUN (1 Eylül 2026'da bulundu)
+-- Canlı veritabanında şema dosyasında OLMAYAN bir index vardı:
+--
+--   CREATE UNIQUE INDEX idx_gold_ptf_predictions_daily_target_ts
+--       ON gold.ptf_predictions_daily USING btree (target_ts);
+--
+-- Muhtemelen `model_name` birincil anahtara eklenmeden önce "saat başına tek
+-- satır" kuralını dayatmak için elle yaratılmış, hiç kayda geçmemiş.
+--
+-- ETKİSİ
+-- Tablonun PK'sı (target_ts, model_name) — yani tasarım gereği birden fazla
+-- model yan yana yaşayabilmeli. Bu index onu engelliyordu: ikinci bir model
+-- için INSERT `UniqueViolation` ile düşüyordu. Shadow run (yeni modeli eskinin
+-- yanında koşturup karşılaştırma) DB seviyesinde imkânsızdı.
+--
+-- Ayrıca sıfırdan kurulan bir veritabanı (01_init_schema.sql) bu index'e sahip
+-- olmuyordu — canlı DB ile temiz kurulum farklı davranıyordu (şema kayması).
+--
+-- NEDEN GÜVENLİ
+-- Tek model varken PK zaten aynı garantiyi veriyor; bu index tamamen fazlalık.
+-- `idx_gold_predictions_target_ts` (benzersiz OLMAYAN, aynı sütun) sorgu
+-- performansı için yerinde kalıyor.
+--
+-- GERİ ALMA (gerekirse — ama önce tabloda tek model olduğundan emin ol)
+--   CREATE UNIQUE INDEX idx_gold_ptf_predictions_daily_target_ts
+--       ON gold.ptf_predictions_daily USING btree (target_ts);
+-- ═══════════════════════════════════════════════════════════════════════════
+
+DROP INDEX IF EXISTS gold.idx_gold_ptf_predictions_daily_target_ts;

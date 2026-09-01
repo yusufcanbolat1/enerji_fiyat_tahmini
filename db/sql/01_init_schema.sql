@@ -241,6 +241,12 @@ CREATE TABLE IF NOT EXISTS gold.kgup_load_pre_forecasts (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- target_ts index'i BENZERSİZ DEĞİLDİR ve öyle olmamalıdır. Tablonun PK'sı
+-- (target_ts, model_name): aynı saat için birden fazla model (ör. shadow run'da
+-- LightGBM_v1 + ensemble_v1) yan yana durabilmeli. Canlı DB'de bir noktada elle
+-- yaratılmış `idx_gold_ptf_predictions_daily_target_ts` adlı BENZERSİZ bir index
+-- bunu engelliyordu; bkz. migrations/02_drop_orphan_unique_index.sql.
+-- Bu sütuna UNIQUE index EKLEME.
 CREATE INDEX IF NOT EXISTS idx_gold_predictions_target_ts ON gold.ptf_predictions_daily(target_ts);
 
 
