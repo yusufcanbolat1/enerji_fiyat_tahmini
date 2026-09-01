@@ -8,7 +8,7 @@ Ensemble'a geçişten sonra ikinci bir görevi daha var: **konformal bandın
 kalibrasyon geçmişini kurmak.** Canlı pipeline yarının bandını son 60 günün
 (ensemble P50 − gerçekleşen) hatalarından hesaplıyor; o geçmiş burada üretiliyor.
 Backfill koşulmadan canlıya geçilirse band 60 gün boyunca sabit ±$25 fallback'inde
-kalır. Bkz. `ENSEMBLE_AKSIYON_PLANI.md`.
+kalır. Bkz. `../electricity_price_forecasting_in_turkish_day_ahead_market/ENSEMBLE_AKSIYON_PLANI.md`.
 
 İki geçişli:
   1. (paralel) Her gün için 3 ensemble üyesi eğitilir, P50 + anlaşmazlık üretilir.

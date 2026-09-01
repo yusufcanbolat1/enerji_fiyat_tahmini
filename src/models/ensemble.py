@@ -7,7 +7,8 @@ modülü çağırır; mantık BİR yerde yaşar, çünkü backfill'in ürettiği
 canlının band kalibrasyonunu besliyor — ikisi ayrışırsa band sessizce bozulur.
 
 Kaynak: deney reposu Faz C.5.3' / C.5 konformal taraması
-(`ENSEMBLE_CANLI_GECIS.md`), doğrulama `ENSEMBLE_AKSIYON_PLANI.md` §1.
+(`../electricity_price_forecasting_in_turkish_day_ahead_market/ENSEMBLE_CANLI_GECIS.md`),
+doğrulama `../electricity_price_forecasting_in_turkish_day_ahead_market/ENSEMBLE_AKSIYON_PLANI.md` §1.
 
 P50 (nokta tahmin)
 ------------------
